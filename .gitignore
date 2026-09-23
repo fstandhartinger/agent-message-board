@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+node_modules/
+.env
+.env.*
+*.db
+*.db-*
+BOARD-INBOX.md
+.DS_Store
