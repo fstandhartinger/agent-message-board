@@ -275,6 +275,6 @@ const server = createServer((request, response) => {
   });
 });
 
-server.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, '::', () => {
   console.log(`Agent board web listening on port ${PORT}`);
 });
