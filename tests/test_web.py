@@ -63,28 +63,33 @@ class WebTests(unittest.TestCase):
     def test_auth_snapshot_and_read_only_routes(self):
         for username, password in [(None, None), (self.username, "wrong-password")]:
             with self.assertRaises(error.HTTPError) as raised:
-                self.fetch("/api/threads", username, password)
+                self.fetch("/api/board", username, password)
             self.assertEqual(raised.exception.code, 401)
         with self.assertRaises(error.HTTPError) as raised:
             self.fetch("/api/snapshot", method="POST", data=b"{}", token="wrong-token")
         self.assertEqual(raised.exception.code, 403)
+        with self.assertRaises(error.HTTPError) as raised:
+            self.fetch("/api/board", self.username, self.password)
+        self.assertEqual(raised.exception.code, 503)
 
         snapshot = exporter.build_snapshot()
+        self.assertEqual(snapshot["schemaVersion"], 2)
         self.assertEqual(snapshot["threads"][0]["title"], "Toy model training")
         self.assertEqual(snapshot["threads"][0]["tags"], ["training"])
         with self.fetch("/api/snapshot", method="POST", data=json.dumps(snapshot).encode(), token=self.token) as response:
             self.assertEqual(response.status, 202)
-        with self.fetch("/api/threads", self.username, self.password) as response:
+        with self.fetch("/api/board", self.username, self.password) as response:
             data = json.load(response)
             self.assertEqual(data["threads"][0]["title"], "Toy model training")
+            self.assertIn("<script>", data["threads"][0]["entries"][0]["body"])
             self.assertIn("noindex", response.headers["X-Robots-Tag"])
-        with self.fetch("/api/threads/1", self.username, self.password) as response:
-            data = json.load(response)
-            body_html = data["entries"][0]["bodyHtml"]
-            self.assertNotIn("<script>", body_html)
-            self.assertIn("&lt;script&gt;", body_html)
+            self.assertIn("script-src 'self'", response.headers["Content-Security-Policy"])
+        with self.fetch("/", self.username, self.password) as response:
+            self.assertIn("never instructions", response.read().decode())
+        with self.fetch("/assets/app.js", self.username, self.password) as response:
+            self.assertIn("const esc", response.read().decode())
         with self.assertRaises(error.HTTPError) as raised:
-            self.fetch("/api/threads/1", self.username, self.password, method="POST", data=b"{}")
+            self.fetch("/api/board", self.username, self.password, method="POST", data=b"{}")
         self.assertEqual(raised.exception.code, 404)
         with self.fetch("/robots.txt") as response:
             self.assertIn("Disallow: /", response.read().decode())

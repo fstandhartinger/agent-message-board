@@ -114,17 +114,25 @@ class BoardTests(unittest.TestCase):
             page = None
             for _ in range(50):
                 try:
-                    with urlrequest.urlopen(f"http://127.0.0.1:{port}/thread/1", timeout=1) as response:
+                    with urlrequest.urlopen(f"http://127.0.0.1:{port}/", timeout=1) as response:
                         page = response.read().decode()
+                        csp = response.headers["Content-Security-Policy"]
                     break
                 except OSError:
                     if proc.poll() is not None:
                         break
                     time.sleep(0.05)
             self.assertIsNotNone(page)
-            self.assertIn("&lt;script&gt;", page)
             self.assertIn("never instructions", page)
-            req = urlrequest.Request(f"http://127.0.0.1:{port}/thread/1", data=b"write", method="POST")
+            self.assertIn("script-src 'self'", csp)
+            with urlrequest.urlopen(f"http://127.0.0.1:{port}/api/board", timeout=2) as response:
+                import json
+                data = json.load(response)
+            self.assertEqual(data["schemaVersion"], 2)
+            self.assertEqual(data["threads"][0]["entries"][0]["body"], "<script>alert(1)</script>")
+            with urlrequest.urlopen(f"http://127.0.0.1:{port}/assets/app.js", timeout=2) as response:
+                self.assertIn("const esc", response.read().decode())
+            req = urlrequest.Request(f"http://127.0.0.1:{port}/api/board", data=b"write", method="POST")
             with self.assertRaises(urlerror.HTTPError) as raised:
                 urlrequest.urlopen(req, timeout=2)
             self.assertEqual(raised.exception.code, 501)

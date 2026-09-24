@@ -3,7 +3,6 @@ import { readFile } from 'node:fs/promises';
 import { timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import MarkdownIt from 'markdown-it';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const USERNAME = process.env.BOARD_USERNAME || 'board';
@@ -15,17 +14,11 @@ const FAILURE_WINDOW_MS = 15 * 60 * 1000;
 const FAILURE_LIMIT = 10;
 const failures = new Map();
 let snapshot = null;
+let snapshotJson = '';
 
 if (!PASSWORD || Buffer.byteLength(PASSWORD, 'utf8') < 20 || !EXPORT_TOKEN) {
   throw new Error('Required board authentication configuration is missing');
 }
-
-const markdown = new MarkdownIt({
-  html: false,
-  linkify: false,
-  breaks: false,
-  typographer: false
-});
 
 const fixedTimeEqual = (left, right) => {
   const a = Buffer.from(String(left));
@@ -121,43 +114,13 @@ async function readRequestBody(request, response) {
 }
 
 function validSnapshot(candidate) {
-  if (!candidate || candidate.schemaVersion !== 1 || !Array.isArray(candidate.threads)) return false;
+  if (!candidate || ![1, 2].includes(candidate.schemaVersion) || !Array.isArray(candidate.threads)) return false;
   if (candidate.threads.length > 20000) return false;
   return candidate.threads.every((thread) =>
     thread && typeof thread.id === 'string' && typeof thread.title === 'string' &&
     Array.isArray(thread.tags) && Array.isArray(thread.entries) &&
     thread.entries.length <= 100000
   );
-}
-
-function cleanString(value) {
-  return typeof value === 'string' ? value : '';
-}
-
-function matches(thread, { tag, agent, kind, query }) {
-  if (tag && !thread.tags.some((value) => value.toLocaleLowerCase() === tag.toLocaleLowerCase())) return false;
-  if (agent && !thread.entries.some((entry) => cleanString(entry.author).toLocaleLowerCase() === agent.toLocaleLowerCase())) return false;
-  if (kind && !thread.entries.some((entry) => cleanString(entry.kind).toLocaleLowerCase() === kind.toLocaleLowerCase())) return false;
-  if (!query) return true;
-  const terms = [thread.title, ...(thread.tags || [])];
-  for (const entry of thread.entries) terms.push(entry.author, entry.kind, entry.body);
-  const haystack = terms.map(cleanString).join('\n').toLocaleLowerCase();
-  return haystack.includes(query.toLocaleLowerCase());
-}
-
-function summary(thread) {
-  const entries = thread.entries || [];
-  const latest = entries.at(-1) || {};
-  return {
-    id: thread.id,
-    title: thread.title,
-    tags: thread.tags || [],
-    lastActivity: thread.lastActivity || latest.createdAt || '',
-    entryCount: entries.length,
-    archived: Boolean(thread.archived),
-    lastAuthor: latest.author || '',
-    lastKind: latest.kind || ''
-  };
 }
 
 async function handle(request, response) {
@@ -189,10 +152,11 @@ async function handle(request, response) {
     }
     if (!validSnapshot(candidate)) return sendJson(response, 400, { error: 'Invalid snapshot format' });
     snapshot = candidate;
+    snapshotJson = JSON.stringify(candidate);
     return sendJson(response, 202, { ok: true, exportedAt: candidate.exportedAt || null });
   }
 
-  const protectedArea = url.pathname === '/' || url.pathname.startsWith('/api/') || url.pathname.startsWith('/assets/');
+  const protectedArea = url.pathname === '/' || url.pathname.startsWith('/thread/') || url.pathname.startsWith('/api/') || url.pathname.startsWith('/assets/');
   if (protectedArea) {
     if (!withinFailureLimit(address)) return sendJson(response, 429, { error: 'Too many failed login attempts' }, { 'Retry-After': '900' });
     if (!basicAuth(request)) {
@@ -202,7 +166,7 @@ async function handle(request, response) {
     failures.delete(address);
   }
 
-  if (url.pathname === '/' && request.method === 'GET') {
+  if ((url.pathname === '/' || url.pathname.startsWith('/thread/')) && request.method === 'GET') {
     const html = await readFile(path.join(HERE, 'public', 'index.html'), 'utf8');
     return send(response, 200, html, 'text/html; charset=utf-8');
   }
@@ -215,54 +179,9 @@ async function handle(request, response) {
     return send(response, 200, css, 'text/css; charset=utf-8');
   }
 
-  if (url.pathname === '/api/threads' && request.method === 'GET') {
+  if (url.pathname === '/api/board' && request.method === 'GET') {
     if (!snapshot) return sendJson(response, 503, { error: 'Board snapshot is not available yet' });
-    const threads = snapshot.threads || [];
-    const tag = url.searchParams.get('tag') || '';
-    const agent = url.searchParams.get('agent') || '';
-    const kind = url.searchParams.get('kind') || '';
-    const query = (url.searchParams.get('q') || '').slice(0, 300);
-    const filtered = threads.filter((thread) => matches(thread, { tag, agent, kind, query }));
-    filtered.sort((a, b) => String(b.lastActivity || '').localeCompare(String(a.lastActivity || '')));
-    const tags = new Set();
-    const agents = new Set();
-    const kinds = new Set();
-    for (const thread of threads) {
-      for (const value of thread.tags || []) tags.add(String(value));
-      for (const entry of thread.entries || []) {
-        if (entry.author) agents.add(String(entry.author));
-        if (entry.kind) kinds.add(String(entry.kind));
-      }
-    }
-    return sendJson(response, 200, {
-      exportedAt: snapshot.exportedAt || null,
-      threads: filtered.slice(0, 2000).map(summary),
-      filters: {
-        tags: [...tags].sort((a, b) => a.localeCompare(b)),
-        agents: [...agents].sort((a, b) => a.localeCompare(b)),
-        kinds: [...kinds].sort((a, b) => a.localeCompare(b))
-      }
-    });
-  }
-
-  if (url.pathname.startsWith('/api/threads/') && request.method === 'GET') {
-    if (!snapshot) return sendJson(response, 503, { error: 'Board snapshot is not available yet' });
-    let id;
-    try { id = decodeURIComponent(url.pathname.slice('/api/threads/'.length)); }
-    catch { return sendJson(response, 400, { error: 'Invalid thread id' }); }
-    const thread = snapshot.threads.find((item) => String(item.id) === id);
-    if (!thread) return sendJson(response, 404, { error: 'Thread not found' });
-    return sendJson(response, 200, {
-      ...summary(thread),
-      entries: thread.entries.map((entry) => ({
-        id: String(entry.id ?? ''),
-        author: cleanString(entry.author),
-        kind: cleanString(entry.kind || 'note'),
-        createdAt: cleanString(entry.createdAt),
-        bodyHtml: markdown.render(cleanString(entry.body)),
-        attachments: Array.isArray(entry.attachments) ? entry.attachments.map(cleanString) : []
-      }))
-    });
+    return send(response, 200, snapshotJson, 'application/json; charset=utf-8');
   }
 
   return send(response, 404, 'Not found\n', 'text/plain; charset=utf-8');

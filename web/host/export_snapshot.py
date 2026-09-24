@@ -3,80 +3,38 @@
 
 import json
 import os
+import shutil
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-from urllib.parse import quote
 
 
 DB_PATH = Path(os.environ.get("AGENT_BOARD_DB", str(Path(os.environ.get("AGENT_BOARD_DIR", str(Path.home() / ".agent-board"))) / "board.db"))).expanduser()
 MAX_RESPONSE_BYTES = 1024
 
 
+def cli_path():
+    configured = os.environ.get("AGENT_BOARD_BIN")
+    if configured:
+        return configured
+    for candidate in (Path(__file__).resolve().parents[2] / "bin" / "agent-board", Path.home() / "bin" / "agent-board"):
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("agent-board") or "agent-board"
+
+
 def build_snapshot():
-    db_uri = "file:" + quote(str(DB_PATH.resolve()), safe="/") + "?mode=ro"
-    connection = sqlite3.connect(db_uri, uri=True, timeout=10, isolation_level=None)
-    connection.row_factory = sqlite3.Row
-    try:
-        connection.execute("PRAGMA query_only=ON")
-        connection.execute("BEGIN")
-        rows = connection.execute(
-            "SELECT id,title,created_at,updated_at,archived_at "
-            "FROM threads ORDER BY updated_at DESC,id DESC"
-        ).fetchall()
-        threads = {
-            int(row["id"]): {
-                "id": str(row["id"]),
-                "title": row["title"],
-                "createdAt": row["created_at"],
-                "lastActivity": row["updated_at"],
-                "archived": row["archived_at"] is not None,
-                "tags": [],
-                "entries": [],
-            }
-            for row in rows
-        }
-
-        for row in connection.execute("SELECT thread_id,tag FROM thread_tags ORDER BY tag"):
-            thread = threads.get(int(row["thread_id"]))
-            if thread is not None:
-                thread["tags"].append(row["tag"])
-
-        for row in connection.execute(
-            "SELECT id,thread_id,author,kind,body,created_at "
-            "FROM entries ORDER BY thread_id,id"
-        ):
-            thread = threads.get(int(row["thread_id"]))
-            if thread is not None:
-                thread["entries"].append({
-                    "id": str(row["id"]),
-                    "author": row["author"],
-                    "kind": row["kind"],
-                    "body": row["body"],
-                    "createdAt": row["created_at"],
-                    "attachments": [],
-                })
-
-        entry_index = {
-            int(entry["id"]): entry
-            for thread in threads.values()
-            for entry in thread["entries"]
-        }
-        for row in connection.execute("SELECT entry_id,path FROM attachments ORDER BY id"):
-            entry = entry_index.get(int(row["entry_id"]))
-            if entry is not None:
-                entry["attachments"].append(row["path"])
-
-        return {
-            "schemaVersion": 1,
-            "exportedAt": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-            "threads": list(threads.values()),
-        }
-    finally:
-        connection.close()
+    """The CLI builds the snapshot from a read-only SQLite connection (schema version 2)."""
+    env = {**os.environ, "AGENT_BOARD_DB": str(DB_PATH)}
+    result = subprocess.run([sys.executable, cli_path(), "--as", "web:exporter", "snapshot"],
+                            capture_output=True, text=True, env=env, timeout=60, check=False)
+    if result.returncode != 0:
+        raise ValueError("snapshot command failed")
+    return json.loads(result.stdout)
 
 
 def main():
@@ -109,7 +67,7 @@ def main():
     except HTTPError as error:
         print(f"agent-board export failed: HTTP {error.code}", file=sys.stderr)
         return 1
-    except (sqlite3.Error, URLError, TimeoutError, OSError, ValueError) as error:
+    except (sqlite3.Error, URLError, TimeoutError, OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"agent-board export failed: {type(error).__name__}", file=sys.stderr)
         return 1
 
