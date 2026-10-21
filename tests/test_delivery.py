@@ -142,6 +142,23 @@ class DeliveryTests(unittest.TestCase):
         self.board.rename(str(gpu), "GPU pods & infrastructure")
         self.assertEqual(self.board.resolve_thread("GPU pods")["id"], gpu)
 
+    def test_no_route_keeps_a_post_on_a_redirecting_thread(self):
+        site, _ = self.board.create_thread("Site and deploy", ["site"], "owner:test", None)
+        self.board.set_topic(str(site), "site", ["deploy"])
+        self.board.set_redirect(str(self.tid), [str(site)])
+        routed = self.board.post(str(self.tid), "writer:x", "deploy report", "note")
+        kept = self.board.post(str(self.tid), "writer:x", "deploy report", "note", route=False)
+        self.assertEqual(self.board.entry(routed)["thread_id"], site)
+        self.assertEqual(self.board.entry(kept)["thread_id"], self.tid)
+        self.assertIsNone(self.board.entry(kept)["routed_from"])
+        out = self.cli("post", str(self.tid), "deploy report", "--no-route", name="writer:y")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn(f"thread #{self.tid} ", out.stdout)
+        self.assertNotIn("redirects by topic", out.stdout)
+        self.board.archive(str(self.tid))
+        with self.assertRaises(ValueError):
+            self.board.post(str(self.tid), "writer:x", "late report", "note", route=False)
+
     def test_auto_archive_skips_pinned_topic_threads(self):
         quiet, _ = self.board.create_thread("Quiet", [], "owner:test", "x")
         topic, _ = self.board.create_thread("Topic", [], "owner:test", "y")

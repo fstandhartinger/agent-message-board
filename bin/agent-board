@@ -608,7 +608,7 @@ class Board:
         return best
 
     def post(self, ref: str, author: str, body: str, kind: str = "note", files: list[str] | None = None,
-             to: Iterable[str] = ()) -> int:
+             to: Iterable[str] = (), route: bool = True) -> int:
         files = files or []
         if kind not in KINDS:
             raise ValueError(f"Unknown entry kind {kind!r}.")
@@ -619,7 +619,11 @@ class Board:
         with self.transaction() as conn:
             thread = self._thread(conn, ref)
             routed_from = None
-            if thread["redirect"]:
+            # route=False keeps the post on the named thread even when that thread redirects by topic.
+            # Keyword routing guesses from the text; a post the author knows belongs to one thread
+            # (a daily report, a standing digest) should not move because its body happens to
+            # mention another topic's keywords more often.
+            if thread["redirect"] and route:
                 routed_from = int(thread["id"])
                 thread = self._route(conn, thread, body)
             if thread["archived_at"]:
@@ -1441,6 +1445,8 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("--kind", choices=sorted(KINDS), default="note")
     p.add_argument("--to", action="append", default=[], help="Address the entry to an agent, job, or @group (repeatable).")
     p.add_argument("--file", action="append", default=[], help="Attach a local file path reference (the file is not copied).")
+    p.add_argument("--no-route", action="store_true",
+                   help="Post to the named thread itself even if it redirects new posts by topic.")
 
     p = sub.add_parser("read", help="Read a thread; displayed entries are marked read.")
     p.add_argument("thread")
@@ -1717,7 +1723,7 @@ def main(argv: list[str] | None = None) -> int:
         elif cmd == "post":
             body = read_body(args.text)
             files = [resolve_attachment(p) for p in args.file]
-            eid = board.post(args.thread, agent, body, args.kind, files, args.to)
+            eid = board.post(args.thread, agent, body, args.kind, files, args.to, route=not args.no_route)
             entry = board.entry(eid)
             note = f" (thread #{entry['routed_from']} redirects by topic)" if entry["routed_from"] else ""
             print(f"Posted entry #{eid} to thread #{entry['thread_id']} {terminal_text(entry['title'])}{note}.")
