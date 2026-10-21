@@ -249,6 +249,34 @@ def validate_content(title: str | None, body: str, attachments: Iterable[str] = 
         assert_no_secrets(path)
 
 
+def assert_not_empty(body: str, files: Iterable[str] = ()) -> None:
+    # An entry with no text and no attachment reaches every subscriber's inbox and says nothing.
+    # It is almost always a broken pipe (`post T - < missing-file`) or an unset shell variable,
+    # so the board refuses it rather than delivering a blank item to every reader.
+    if not body.strip() and not list(files):
+        raise ValueError("Post refused: the entry is empty. Give it text or an attachment.")
+
+
+def lint_body(body: str) -> None:
+    """Run the optional AGENT_BOARD_LINT_CMD over a post body before it is stored.
+
+    The command receives the body on standard input. A non-zero exit refuses the post and shows the
+    linter's own output, so a team can hold every post to a house style (length, one idea per
+    sentence, banned words) without the board knowing the rules. Unset means no lint.
+    """
+    command = os.environ.get("AGENT_BOARD_LINT_CMD", "").strip()
+    if not command:
+        return
+    try:
+        result = subprocess.run(shlex.split(command), input=body, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        # A linter that cannot run is a broken setup, not a style finding: refuse and say which.
+        raise ValueError(f"Post refused: the lint command could not run ({exc}).") from exc
+    if result.returncode != 0:
+        detail = (result.stdout + result.stderr).strip()[:2000]
+        raise ValueError(f"Post refused by the lint command (exit {result.returncode}). Fix the text, or pass --no-lint.\n{detail}")
+
+
 def read_body(value: str) -> str:
     if value != "-":
         return value
@@ -569,6 +597,9 @@ class Board:
                       to: Iterable[str] = ()) -> tuple[int, int | None]:
         files = files or []
         validate_content(title, body or "", files)
+        if body is not None:
+            # `new` without --body creates an empty thread on purpose; an explicit empty body does not.
+            assert_not_empty(body, files)
         if len(files) > MAX_ATTACHMENTS:
             raise ValueError(f"At most {MAX_ATTACHMENTS} attachment references are allowed per entry.")
         if kind not in KINDS:
@@ -613,6 +644,7 @@ class Board:
         if kind not in KINDS:
             raise ValueError(f"Unknown entry kind {kind!r}.")
         validate_content(None, body, files)
+        assert_not_empty(body, files)
         if len(files) > MAX_ATTACHMENTS:
             raise ValueError(f"At most {MAX_ATTACHMENTS} attachment references are allowed per entry.")
         author = validate_agent(author)
@@ -1434,11 +1466,13 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("--to", action="append", default=[], help="Address the entry to an agent, job, or @group (repeatable).")
     p.add_argument("--file", action="append", default=[], help="Attach a local file path reference (the file is not copied).")
     p.add_argument("--telegram", action="store_true", help="Enable a throttled digest line to the human for this thread.")
+    p.add_argument("--no-lint", action="store_true", help="Skip AGENT_BOARD_LINT_CMD for this entry.")
 
     p = sub.add_parser("post", help="Post a markdown entry to a thread (ID, topic slug, or title).")
     p.add_argument("thread")
     p.add_argument("text", help="Markdown text, or - to read it from stdin.")
     p.add_argument("--kind", choices=sorted(KINDS), default="note")
+    p.add_argument("--no-lint", action="store_true", help="Skip AGENT_BOARD_LINT_CMD for this entry.")
     p.add_argument("--to", action="append", default=[], help="Address the entry to an agent, job, or @group (repeatable).")
     p.add_argument("--file", action="append", default=[], help="Attach a local file path reference (the file is not copied).")
 
@@ -1711,11 +1745,15 @@ def main(argv: list[str] | None = None) -> int:
                       f"{thread['entry_count']} entries · {stamp}{latest_text}{flags}")
         elif cmd == "new":
             body = read_body(args.body) if args.body is not None else None
+            if body is not None and not args.no_lint:
+                lint_body(body)
             files = [resolve_attachment(p) for p in args.file]
             tid, eid = board.create_thread(args.title, args.tag, agent, body, args.kind, files, args.telegram, args.to)
             print(f"Created thread #{tid}" + (f" with entry #{eid}." if eid is not None else "."))
         elif cmd == "post":
             body = read_body(args.text)
+            if not args.no_lint:
+                lint_body(body)
             files = [resolve_attachment(p) for p in args.file]
             eid = board.post(args.thread, agent, body, args.kind, files, args.to)
             entry = board.entry(eid)

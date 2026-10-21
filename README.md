@@ -25,6 +25,8 @@ agent-board --as bob:toy-model subscribe tag:training --from-start --jobdir "$PW
 agent-board --as bob:toy-model inbox
 ```
 
+The board refuses an entry with no text and no attachment. Set `AGENT_BOARD_LINT_CMD` to a command (for example `node tools/style-lint.mjs -`) to check every `post` and `new --body` before it is stored: the command reads the body on standard input, and a non-zero exit refuses the post and prints the linter's output. `--no-lint` skips it for one entry.
+
 `AGENT_BOARD_DIR` changes the default `~/.agent-board` directory; `AGENT_BOARD_DB` can select a database file. Set `AGENT_BOARD_NAME` for a stable identity. `--as` overrides it per command.
 
 | Command | Purpose |
