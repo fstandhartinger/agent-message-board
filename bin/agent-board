@@ -1386,18 +1386,39 @@ def format_push(items: list[dict], agent: str, max_chars: int = HOOK_MAX_CHARS) 
     return "\n".join(lines)
 
 
-def display_entry(row: sqlite3.Row | dict) -> None:
+def brief_body(body: str, max_chars: int) -> tuple[str, bool]:
+    """Return the entry's first paragraph, cut to max_chars, and whether anything was left out.
+
+    Long unit reports are the norm on a busy board, and an agent that reads its inbox every few
+    minutes pays for every byte of every post on every read. Authors put the claim or the result
+    first, so the first paragraph is the part a reader needs to decide whether to open the rest.
+    """
+    text = body.strip()
+    first = re.split(r"\n\s*\n", text, maxsplit=1)[0]
+    short = one_line(first, max_chars)
+    return short, short != " ".join(text.split())
+
+
+def display_entry(row: sqlite3.Row | dict, brief: int = 0) -> None:
     extra = ""
     if isinstance(row, dict) and row.get("addresses"):
         extra = " → " + " ".join("@" + a for a in row["addresses"])
     print(f"#{row['id']} [{row['created_at']}] {terminal_text(row['author'])} · {row['kind']}{terminal_text(extra)}")
+    if brief:
+        short, cut = brief_body(row["body"], brief)
+        print(terminal_text(short))
+        if cut:
+            # The pointer reads exactly this entry and the ones after it, and marks them read.
+            print(f"(more: agent-board read {row['thread_id']} --since {int(row['id']) - 1})")
+        print()
+        return
     print(terminal_text(row["body"]))
     for path in (row.get("attachments", []) if isinstance(row, dict) else []):
         print(f"Attachment reference: {terminal_text(path)}")
     print()
 
 
-def print_entry_set(rows: list[dict]) -> None:
+def print_entry_set(rows: list[dict], brief: int = 0) -> None:
     print(SAFETY_HEADER)
     print()
     if not rows:
@@ -1411,7 +1432,7 @@ def print_entry_set(rows: list[dict]) -> None:
                 print()
                 heading = current
         print(f"Thread #{row['thread_id']}: {terminal_text(row['title'])}")
-        display_entry(row)
+        display_entry(row, brief)
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -1462,6 +1483,11 @@ def make_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("inbox", help="Show unread entries (addressed first, then subscriptions); marks them read.")
     p.add_argument("--limit", type=int, default=100)
+    p.add_argument("--brief", action="store_true",
+                   help="Show each entry's first paragraph only, with a pointer to the full text "
+                        "(default when AGENT_BOARD_INBOX_BRIEF=1).")
+    p.add_argument("--full", action="store_true", help="Show full entries even when AGENT_BOARD_INBOX_BRIEF=1.")
+    p.add_argument("--max-chars", type=int, default=300, help="Length cap for --brief (default 300).")
 
     p = sub.add_parser("wait", help="Block until a thread or inbox has a new unread entry.")
     p.add_argument("target", nargs="?", help="Thread ID/title; omit with --inbox.")
@@ -1752,7 +1778,10 @@ def main(argv: list[str] | None = None) -> int:
         elif cmd == "inbox":
             if args.limit < 1 or args.limit > 1000:
                 raise ValueError("Inbox limit must be between 1 and 1000.")
-            print_entry_set(board.inbox(agent, args.limit, mark_read=True, jobdir=jobdir))
+            if args.max_chars < 40 or args.max_chars > 10_000:
+                raise ValueError("--max-chars must be between 40 and 10000.")
+            brief = args.brief or (os.environ.get("AGENT_BOARD_INBOX_BRIEF") == "1" and not args.full)
+            print_entry_set(board.inbox(agent, args.limit, mark_read=True, jobdir=jobdir), args.max_chars if brief else 0)
         elif cmd == "wait":
             if args.inbox == bool(args.target):
                 raise ValueError("Use either a thread target or --inbox.")
