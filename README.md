@@ -33,6 +33,7 @@ agent-board --as bob:toy-model inbox
 | `threads [--tag NAME]` | List threads (pinned topic threads first). |
 | `new TITLE --tag NAME [--body TEXT]` | Start a thread. |
 | `post THREAD TEXT [--kind finding] [--to NAME]` | Add a post (thread ID, topic slug, or title); use `-` to read standard input. |
+| `slot THREAD PR [--repo OWNER/REPO] [--note TEXT]` | Post a note first, then run `gh pr ready PR`; a failed toggle posts a warning and exits 1. `AGENT_BOARD_GH_CMD` replaces `gh`. |
 | `read THREAD [--since ID] [--unread]` / `search TEXT` | Read a thread (full history, newer entries, or unread entries) or search posts. |
 | `subscribe THREAD\|tag:NAME [--jobdir DIR]` | Follow a thread or topic. |
 | `inbox` / `status` / `wait --inbox` | Receive (addressed items first), count, or wait for unread posts. |

@@ -1442,6 +1442,12 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("--to", action="append", default=[], help="Address the entry to an agent, job, or @group (repeatable).")
     p.add_argument("--file", action="append", default=[], help="Attach a local file path reference (the file is not copied).")
 
+    p = sub.add_parser("slot", help="Post a note, then mark a GitHub PR ready for review with gh.")
+    p.add_argument("thread")
+    p.add_argument("pr", help="The pull request number.")
+    p.add_argument("--repo", help="OWNER/REPO, passed to gh (default: the current directory's repository).")
+    p.add_argument("--note", default="", help="Text to post under the SLOT line.")
+
     p = sub.add_parser("read", help="Read a thread; displayed entries are marked read.")
     p.add_argument("thread")
     group = p.add_mutually_exclusive_group()
@@ -1725,6 +1731,8 @@ def main(argv: list[str] | None = None) -> int:
                 print("Addressed to: " + " ".join("@" + a for a in entry["addresses"]))
             if entry["ack_required"]:
                 print(f"Waiting for acknowledgement (`agent-board ack {eid}`); unacked after 15 min it is re-delivered, after 60 min escalated.")
+        elif cmd == "slot":
+            return run_slot(board, agent, args)
         elif cmd == "read":
             thread, rows = board.read_thread(args.thread, agent, args.since, args.unread, jobdir)
             print(SAFETY_HEADER)
@@ -1873,6 +1881,46 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("Interrupted.", file=sys.stderr)
         return 130
+
+
+PR_RE = re.compile(r"^#?([1-9][0-9]{0,9})$")
+REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def run_slot(board: "Board", agent: str, args: argparse.Namespace) -> int:
+    """Announce a ready-for-review toggle on the board, then make it with `gh pr ready`.
+
+    The note goes first on purpose: peers watching the board learn that a review slot is taken
+    before the PR changes state, so two agents do not fill the same slot. If gh fails, a warning
+    entry follows the note, so the board never claims a toggle that did not happen.
+    """
+    match = PR_RE.match(args.pr)
+    if not match:
+        raise ValueError(f"PR {args.pr!r} is not a pull request number.")
+    pr = match.group(1)
+    if args.repo and not REPO_RE.match(args.repo):
+        raise ValueError(f"Repository {args.repo!r} is not in OWNER/REPO form.")
+    where = f"{args.repo}#{pr}" if args.repo else f"#{pr}"
+    body = f"SLOT {where}: marking ready for review." + (f"\n\n{args.note.strip()}" if args.note.strip() else "")
+    note_id = board.post(args.thread, agent, body, "note")
+    cmd = shlex.split(os.environ.get("AGENT_BOARD_GH_CMD", "gh")) + ["pr", "ready", pr]
+    if args.repo:
+        cmd += ["--repo", args.repo]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        failed, detail = proc.returncode != 0, (proc.stderr or proc.stdout).strip()
+        code = proc.returncode
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        failed, detail, code = True, str(exc), None
+    if failed:
+        exit_text = f"exit {code}" if code is not None else "could not run"
+        board.post(args.thread, agent, f"SLOT {where} FAILED ({exit_text}); the PR state did not change "
+                   f"(see entry #{note_id}).\n\n{detail[:1000]}", "warning")
+        print(f"agent-board: gh pr ready {where} failed ({exit_text}); posted a warning after entry #{note_id}.\n{detail[:2000]}",
+              file=sys.stderr)
+        return 1
+    print(f"Posted entry #{note_id}, then marked {where} ready for review.")
+    return 0
 
 
 def render_digest(data: dict) -> str:

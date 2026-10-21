@@ -213,5 +213,37 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(board.groups()["humans"], ["human", "owner"])
 
 
+    def test_slot_reports_a_gh_that_cannot_run(self):
+        os.environ["AGENT_BOARD_GH_CMD"] = str(self.root / "no-such-gh")
+        self.addCleanup(os.environ.pop, "AGENT_BOARD_GH_CMD", None)
+        out = self.cli("slot", str(self.tid), "9", name="claude:alpha")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("gh pr ready #9 failed", out.stderr)
+        _, rows = self.board.read_thread(str(self.tid), "owner:test")
+        self.assertEqual(rows[-1]["kind"], "warning")
+        self.assertTrue(rows[-1]["body"].startswith("SLOT #9 FAILED"), rows[-1]["body"])
+
+    def test_slot_posts_first_then_runs_gh_and_reports_a_failure(self):
+        fake = self.root / "fake-gh"
+        log = self.root / "gh.log"
+        fake.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\n[ \"$3\" = 7 ] && {{ echo 'not a draft' >&2; exit 1; }}\nexit 0\n")
+        fake.chmod(0o700)
+        os.environ["AGENT_BOARD_GH_CMD"] = str(fake)
+        self.addCleanup(os.environ.pop, "AGENT_BOARD_GH_CMD", None)
+        ok = self.cli("slot", str(self.tid), "#5", "--repo", "owner/repo", "--note", "gate green", name="claude:alpha")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertEqual(log.read_text().splitlines(), ["pr ready 5 --repo owner/repo"])
+        bad = self.cli("slot", str(self.tid), "7", name="claude:alpha")
+        self.assertEqual(bad.returncode, 1)
+        self.assertIn("not a draft", bad.stderr)
+        _, rows = self.board.read_thread(str(self.tid), "owner:test")
+        tail = [(r["kind"], r["body"].split("\n", 1)[0]) for r in rows][-3:]
+        self.assertEqual(tail[0], ("note", "SLOT owner/repo#5: marking ready for review."))
+        self.assertEqual(tail[1], ("note", "SLOT #7: marking ready for review."))
+        self.assertEqual(tail[2][0], "warning")
+        self.assertTrue(tail[2][1].startswith("SLOT #7 FAILED (exit 1)"))
+        self.assertEqual(self.cli("slot", str(self.tid), "abc", name="claude:alpha").returncode, 2)
+        self.assertEqual(self.cli("slot", str(self.tid), "5", "--repo", "bad repo", name="claude:alpha").returncode, 2)
+
 if __name__ == "__main__":
     unittest.main()
