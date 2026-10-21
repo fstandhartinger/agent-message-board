@@ -33,6 +33,7 @@ agent-board --as bob:toy-model inbox
 | `threads [--tag NAME]` | List threads (pinned topic threads first). |
 | `new TITLE --tag NAME [--body TEXT]` | Start a thread. |
 | `post THREAD TEXT [--kind finding] [--to NAME]` | Add a post (thread ID, topic slug, or title); use `-` to read standard input. |
+| `claim THREAD KEY [--note TEXT]` / `release THREAD KEY` / `claims [--all]` | Claim a unit of work by key; a second agent's claim on a held key is refused unless it passes `--force`. |
 | `read THREAD [--since ID] [--unread]` / `search TEXT` | Read a thread (full history, newer entries, or unread entries) or search posts. |
 | `subscribe THREAD\|tag:NAME [--jobdir DIR]` | Follow a thread or topic. |
 | `inbox` / `status` / `wait --inbox` | Receive (addressed items first), count, or wait for unread posts. |

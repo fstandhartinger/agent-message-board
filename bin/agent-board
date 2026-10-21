@@ -30,6 +30,11 @@ KINDS = {"note", "finding", "question", "answer", "decision", "handoff", "warnin
 MAX_TITLE = 240
 MAX_BODY_BYTES = 32_768
 MAX_ATTACHMENTS = 10
+# A claim key names one unit of work (a ticket, a ledger row, a branch). Claims are ordinary entries
+# whose first line is `CLAIM <key>` or `RELEASE <key>`, so they need no schema change and stay
+# readable in every view that already shows entries.
+CLAIM_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/#@+-]{0,119}$")
+CLAIM_LINE_RE = re.compile(r"^(CLAIM|RELEASE) (\S+)\s*$")
 MAX_ATTACHMENT_PATH = 2048
 ACK_REMIND_SECONDS = 15 * 60
 ACK_ESCALATE_SECONDS = 60 * 60
@@ -625,6 +630,61 @@ class Board:
             if thread["archived_at"]:
                 raise ValueError(f"Thread #{thread['id']} is archived; post to an active thread instead.")
             entry_id = self._insert_entry(conn, int(thread["id"]), author, kind, body, files, to, routed_from)
+        self._after_entry(entry_id)
+        return entry_id
+
+    @staticmethod
+    def _claim_markers(conn: sqlite3.Connection, key: str | None = None) -> list[dict]:
+        """Every CLAIM/RELEASE marker, oldest first; optionally only those for one key."""
+        out = []
+        for row in conn.execute(
+            "SELECT e.id,e.thread_id,e.author,e.body,e.created_at FROM entries e "
+            "WHERE e.body LIKE 'CLAIM %' OR e.body LIKE 'RELEASE %' ORDER BY e.id"
+        ):
+            match = CLAIM_LINE_RE.match(row["body"].split("\n", 1)[0])
+            if not match or (key is not None and match.group(2) != key):
+                continue
+            out.append({**dict(row), "action": match.group(1), "key": match.group(2)})
+        return out
+
+    def claims(self, include_released: bool = False) -> list[dict]:
+        """The latest marker per key; active claims only unless include_released."""
+        with self.reading() as conn:
+            latest: dict[str, dict] = {}
+            for marker in self._claim_markers(conn):
+                latest[marker["key"]] = marker
+        rows = sorted(latest.values(), key=lambda m: m["id"])
+        return rows if include_released else [m for m in rows if m["action"] == "CLAIM"]
+
+    def claim(self, ref: str, author: str, key: str, note: str = "", release: bool = False,
+              force: bool = False) -> int:
+        """Post a CLAIM (or RELEASE) marker; refuse a key that another agent holds.
+
+        The check and the insert share one IMMEDIATE transaction, so two agents that claim the same
+        key at the same moment cannot both succeed: the second sees the first's marker.
+        """
+        if not CLAIM_KEY_RE.match(key):
+            raise ValueError(f"Claim key {key!r} is not valid: use 1-120 characters from A-Z a-z 0-9 . _ : / # @ + -, no spaces.")
+        author = validate_agent(author)
+        body = f"{'RELEASE' if release else 'CLAIM'} {key}" + (f"\n\n{note.strip()}" if note.strip() else "")
+        validate_content(None, body, [])
+        with self.transaction() as conn:
+            markers = self._claim_markers(conn, key)
+            holder = markers[-1] if markers and markers[-1]["action"] == "CLAIM" else None
+            if release and holder is None:
+                raise ValueError(f"Nothing to release: no agent holds {key!r}.")
+            if holder and holder["author"] != author and not force:
+                verb = "release" if release else "claim"
+                raise ValueError(
+                    f"{key!r} is held by {holder['author']} since {holder['created_at']} (entry #{holder['id']} "
+                    f"in thread #{holder['thread_id']}). Ask them, or pass --force to {verb} it anyway."
+                )
+            thread = self._thread(conn, ref)
+            if thread["archived_at"]:
+                raise ValueError(f"Thread #{thread['id']} is archived; post to an active thread instead.")
+            # A claim stays on the thread it names: routing it by keyword would scatter one key's
+            # history across topic threads.
+            entry_id = self._insert_entry(conn, int(thread["id"]), author, "decision", body, [])
         self._after_entry(entry_id)
         return entry_id
 
@@ -1442,6 +1502,21 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("--to", action="append", default=[], help="Address the entry to an agent, job, or @group (repeatable).")
     p.add_argument("--file", action="append", default=[], help="Attach a local file path reference (the file is not copied).")
 
+    p = sub.add_parser("claim", help="Claim a unit of work by key; refused when another agent holds the key.")
+    p.add_argument("thread")
+    p.add_argument("key", help="The unit of work, e.g. a ticket or row id (no spaces).")
+    p.add_argument("--note", default="", help="Text to post under the CLAIM line.")
+    p.add_argument("--force", action="store_true", help="Claim the key even when another agent holds it.")
+
+    p = sub.add_parser("release", help="Release a claimed key.")
+    p.add_argument("thread")
+    p.add_argument("key")
+    p.add_argument("--note", default="", help="Text to post under the RELEASE line.")
+    p.add_argument("--force", action="store_true", help="Release a key that another agent holds.")
+
+    p = sub.add_parser("claims", help="List the keys that are claimed now.")
+    p.add_argument("--all", action="store_true", help="Also list released keys.")
+
     p = sub.add_parser("read", help="Read a thread; displayed entries are marked read.")
     p.add_argument("thread")
     group = p.add_mutually_exclusive_group()
@@ -1725,6 +1800,19 @@ def main(argv: list[str] | None = None) -> int:
                 print("Addressed to: " + " ".join("@" + a for a in entry["addresses"]))
             if entry["ack_required"]:
                 print(f"Waiting for acknowledgement (`agent-board ack {eid}`); unacked after 15 min it is re-delivered, after 60 min escalated.")
+        elif cmd in ("claim", "release"):
+            eid = board.claim(args.thread, agent, args.key, args.note, release=cmd == "release", force=args.force)
+            entry = board.entry(eid)
+            word = "Released" if cmd == "release" else "Claimed"
+            print(f"{word} {args.key} as entry #{eid} in thread #{entry['thread_id']} {terminal_text(entry['title'])}.")
+        elif cmd == "claims":
+            rows = board.claims(include_released=args.all)
+            if not rows:
+                print("No claims.")
+            for row in rows:
+                state = "held" if row["action"] == "CLAIM" else "released"
+                print(f"{terminal_text(row['key'])}  {state} by {row['author']}  {row['created_at']}  "
+                      f"(entry #{row['id']}, thread #{row['thread_id']})")
         elif cmd == "read":
             thread, rows = board.read_thread(args.thread, agent, args.since, args.unread, jobdir)
             print(SAFETY_HEADER)
