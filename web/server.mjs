@@ -170,12 +170,12 @@ async function handle(request, response) {
     const html = await readFile(path.join(HERE, 'public', 'index.html'), 'utf8');
     return send(response, 200, html, 'text/html; charset=utf-8');
   }
-  if (url.pathname === '/assets/app.js' && request.method === 'GET') {
-    const js = await readFile(path.join(HERE, 'public', 'app.js'), 'utf8');
+  if (['/assets/app.js', '/assets/artifact-badges.js'].includes(url.pathname) && request.method === 'GET') {
+    const js = await readFile(path.join(HERE, 'public', url.pathname === '/assets/app.js' ? 'app.js' : 'artifact-badges.js'), 'utf8');
     return send(response, 200, js, 'text/javascript; charset=utf-8');
   }
-  if (url.pathname === '/assets/styles.css' && request.method === 'GET') {
-    const css = await readFile(path.join(HERE, 'public', 'styles.css'), 'utf8');
+  if (['/assets/styles.css', '/assets/artifact-badges.css'].includes(url.pathname) && request.method === 'GET') {
+    const css = await readFile(path.join(HERE, 'public', url.pathname === '/assets/styles.css' ? 'styles.css' : 'artifact-badges.css'), 'utf8');
     return send(response, 200, css, 'text/css; charset=utf-8');
   }
 

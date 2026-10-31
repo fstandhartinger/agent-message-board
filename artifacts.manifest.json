@@ -1,0 +1,24 @@
+{
+  "surface": "app:agent-message-board",
+  "items": {
+    "app": {
+      "id": "06a2a4",
+      "kind": "app",
+      "title": "Agentenboard",
+      "summary": "Zeigt Themen, Beiträge und offene Bestätigungen der Agenten. Suche und Filter grenzen die angezeigten Einträge ein.",
+      "parent": null,
+      "url": "https://agent-board.app.mintapis.com",
+      "selector": ".topbar",
+      "refs": [
+        {
+          "kind": "code",
+          "target": "github:fstandhartinger/agent-message-board@HEAD:web/public/index.html#L13",
+          "label": "UI-Quelltext"
+        }
+      ],
+      "links": [],
+      "access": "internal"
+    }
+  },
+  "sync_source": "artifacts.manifest.json"
+}

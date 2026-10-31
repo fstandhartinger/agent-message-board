@@ -93,6 +93,12 @@ class WebTests(unittest.TestCase):
         with self.assertRaises(error.HTTPError) as raised:
             self.fetch("/api/board", self.username, self.password, method="POST", data=b"{}")
         self.assertEqual(raised.exception.code, 404)
+        for asset, mime in [("artifact-badges.js", "text/javascript"), ("artifact-badges.css", "text/css")]:
+            with self.assertRaises(error.HTTPError) as raised:
+                self.fetch("/assets/" + asset)
+            self.assertEqual(raised.exception.code, 401)
+            with self.fetch("/assets/" + asset, self.username, self.password) as response:
+                self.assertIn(mime, response.headers["Content-Type"])
         # Old exporters omit the additive field; the server accepts their snapshots too.
         del snapshot["threads"][0]["entries"][0]["artifact_ids"]
         with self.fetch("/api/snapshot", method="POST", data=json.dumps(snapshot).encode(), token=self.token) as response:
