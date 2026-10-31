@@ -145,3 +145,6 @@ mark { background: color-mix(in srgb, var(--warn) 35%, transparent); color: inhe
   .entry { padding: 12px; }
   .time { margin-left: 0; width: 100%; order: 9; }
 }
+
+.artifact-ids { color: var(--muted); font: 12px var(--mono); text-align: right; margin-left: auto; overflow-wrap: anywhere; }
+.entry-head:has(.artifact-ids) .time { margin-left: 0; }

@@ -172,6 +172,7 @@ MIGRATIONS = {
         ("reminded_at", "TEXT"),
         ("escalated_at", "TEXT"),
         ("routed_from", "INTEGER"),
+        ("artifact_ids", "TEXT NOT NULL DEFAULT '[]'"),
     ],
 }
 DEFAULT_GROUPS = {"humans": ["human", "owner"]}
@@ -395,6 +396,44 @@ def parse_addresses(body: str, explicit: Iterable[str] = (), known: set[str] | N
     return list(dict.fromkeys(found))
 
 
+def normalize_artifact(value: str) -> str:
+    """Canonical local format only; registry availability never gates a post."""
+    match = re.fullmatch(r"(?:[aA]#)?([0-9a-fA-F]{6})", value)
+    if not match:
+        raise ValueError(f"Invalid artifact id {value!r}; expected a# followed by 6 hex characters, or bare 6 hex.")
+    return match[1].lower()
+
+
+def artifact_argument(value: str) -> str:
+    try:
+        return normalize_artifact(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def collect_artifacts(body: str, explicit: Iterable[str] = ()) -> list[str]:
+    ids = [normalize_artifact(value) for value in explicit]
+    ids.extend(m[1].lower() for m in re.finditer(r"(?<![\w])[aA]#([0-9a-fA-F]{6})(?![\w])", body))
+    return list(dict.fromkeys(ids))
+
+
+def artifact_ids(row: sqlite3.Row | dict) -> list[str]:
+    """Read old-schema rows and malformed external data without breaking readers."""
+    value = row["artifact_ids"] if "artifact_ids" in row.keys() else []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            value = []
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(v.lower() for v in value if isinstance(v, str) and re.fullmatch(r"[0-9a-fA-F]{6}", v)))
+
+
+def entry_dict(row: sqlite3.Row | dict) -> dict:
+    return {**dict(row), "artifact_ids": artifact_ids(row)}
+
+
 class Board:
     def __init__(self, db_path: Path | str = DB_PATH, read_only: bool = False):
         self.path = Path(db_path).expanduser()
@@ -548,15 +587,16 @@ class Board:
         return known
 
     def _insert_entry(self, conn: sqlite3.Connection, thread_id: int, author: str, kind: str, body: str,
-                      files: list[str], to: Iterable[str] = (), routed_from: int | None = None) -> int:
+                      files: list[str], to: Iterable[str] = (), routed_from: int | None = None,
+                      artifacts: Iterable[str] = ()) -> int:
         stamp = now_text()
         groups = self._groups(conn)
         known = self._known_names(conn) if LEADING_ADDRESS_RE.match(body.split("\n", 1)[0]) else None
         addresses = [a for a in parse_addresses(body, to, known) if a not in agent_aliases(author)]
         ack_required = int(kind == "decision" and any(not self._is_human(a, groups) for a in addresses))
         cur = conn.execute(
-            "INSERT INTO entries(thread_id,author,kind,body,created_at,ack_required,routed_from) VALUES(?,?,?,?,?,?,?)",
-            (thread_id, author, kind, body, stamp, ack_required, routed_from),
+            "INSERT INTO entries(thread_id,author,kind,body,created_at,ack_required,routed_from,artifact_ids) VALUES(?,?,?,?,?,?,?,?)",
+            (thread_id, author, kind, body, stamp, ack_required, routed_from, json.dumps(collect_artifacts(body, artifacts))),
         )
         entry_id = int(cur.lastrowid)
         conn.executemany("INSERT INTO attachments(entry_id,path) VALUES(?,?)", [(entry_id, p) for p in files])
@@ -584,7 +624,7 @@ class Board:
             conn.executemany("INSERT INTO thread_tags(thread_id,tag) VALUES(?,?)", [(thread_id, tag) for tag in clean_tags])
             entry_id = None
             if body is not None or files:
-                entry_id = self._insert_entry(conn, thread_id, validate_agent(author), kind, body or "", files, to)
+                entry_id = self._insert_entry(conn, thread_id, validate_agent(author), kind, body or "", files, to, artifacts=collect_artifacts(title))
         if entry_id is not None:
             self._after_entry(entry_id)
         return thread_id, entry_id
@@ -608,7 +648,7 @@ class Board:
         return best
 
     def post(self, ref: str, author: str, body: str, kind: str = "note", files: list[str] | None = None,
-             to: Iterable[str] = ()) -> int:
+             to: Iterable[str] = (), artifacts: Iterable[str] = ()) -> int:
         files = files or []
         if kind not in KINDS:
             raise ValueError(f"Unknown entry kind {kind!r}.")
@@ -624,7 +664,7 @@ class Board:
                 thread = self._route(conn, thread, body)
             if thread["archived_at"]:
                 raise ValueError(f"Thread #{thread['id']} is archived; post to an active thread instead.")
-            entry_id = self._insert_entry(conn, int(thread["id"]), author, kind, body, files, to, routed_from)
+            entry_id = self._insert_entry(conn, int(thread["id"]), author, kind, body, files, to, routed_from, artifacts)
         self._after_entry(entry_id)
         return entry_id
 
@@ -635,7 +675,7 @@ class Board:
             ).fetchone()
             if not row:
                 return None
-            out = dict(row)
+            out = entry_dict(row)
             out["addresses"] = self._addresses(conn, entry_id)
             return out
 
@@ -858,7 +898,7 @@ class Board:
                 continue
             delivered, addressed = match(row)
             if delivered or addressed:
-                item = dict(row)
+                item = entry_dict(row)
                 item["attachments"] = attachments.get(int(row["id"]), [])
                 item["addresses"] = match.addresses.get(int(row["id"]), [])
                 item["addressed"] = addressed
@@ -905,7 +945,7 @@ class Board:
                 delivered, addressed = match(raw)
                 if eid in reads or not (delivered or addressed):
                     continue
-            row = dict(raw)
+            row = entry_dict(raw)
             row["attachments"] = attachments.get(eid, [])
             row["addresses"] = match.addresses.get(eid, [])
             out.append(row)
@@ -919,7 +959,7 @@ class Board:
                 "WHERE e.thread_id=? AND e.id>? ORDER BY e.id", (thread_id, entry_id)
             ).fetchall()
             files = self._attachments(conn, "WHERE entry_id IN (SELECT id FROM entries WHERE thread_id=? AND id>?)", (thread_id, entry_id))
-            return [{**dict(r), "attachments": files.get(int(r["id"]), [])} for r in rows]
+            return [{**entry_dict(r), "attachments": files.get(int(r["id"]), [])} for r in rows]
 
     def status(self, agent: str, jobdir: str = "") -> tuple[list[tuple[sqlite3.Row, int]], int]:
         agent = validate_agent(agent)
@@ -953,17 +993,23 @@ class Board:
                 out.append({**dict(thread), "tags": tags, "latest": dict(latest) if latest else None, "entry_count": count})
             return out
 
-    def search(self, text: str, limit: int = 100) -> list[dict]:
+    def search(self, text: str = "", limit: int = 100, artifact: str | None = None) -> list[dict]:
         if len(text) > 300:
             raise ValueError("Search text is limited to 300 characters.")
+        aid = normalize_artifact(artifact) if artifact is not None else None
         pattern = "%" + escape_like(text) + "%"
         with self.reading() as conn:
+            # Column may not exist yet in a read-only old-schema database.
+            has_ids = any(r[1] == "artifact_ids" for r in conn.execute("PRAGMA table_info(entries)"))
+            if aid and not has_ids:
+                return []
+            clause = " AND EXISTS (SELECT 1 FROM json_each(e.artifact_ids) WHERE value=?)" if aid else ""
             rows = conn.execute(
                 "SELECT e.*,t.title FROM entries e JOIN threads t ON t.id=e.thread_id "
-                "WHERE e.body LIKE ? ESCAPE '\\' OR t.title LIKE ? ESCAPE '\\' ORDER BY e.id DESC LIMIT ?",
-                (pattern, pattern, limit),
+                "WHERE (e.body LIKE ? ESCAPE '\\' OR t.title LIKE ? ESCAPE '\\')" + clause + " ORDER BY e.id DESC LIMIT ?",
+                (pattern, pattern, *((aid,) if aid else ()), limit),
             ).fetchall()
-            return [dict(r) for r in rows]
+            return [entry_dict(r) for r in rows]
 
     def archive(self, ref: str | None = None, older_than_days: float | None = None, include_pinned: bool = False) -> int:
         if (ref is None) == (older_than_days is None):
@@ -1164,17 +1210,17 @@ class Board:
                     if row["ack_required"] and row["remind_round"] and delivered.get(eid, -1) < 100 + int(row["remind_round"]):
                         status = self._ack_status(conn, row, groups)
                         if status["state"] == "open":
-                            items.append({**dict(row), "push": "sender", "round": 100 + int(row["remind_round"]), "ack": status, "addressed": False})
+                            items.append({**entry_dict(row), "push": "sender", "round": 100 + int(row["remind_round"]), "ack": status, "addressed": False})
                     continue
                 if row["ack_required"] and addressed and row["remind_round"] and delivered.get(eid, -1) < int(row["remind_round"]):
                     status = self._ack_status(conn, row, groups)
                     if any(a in match.aliases or a in match.member_of for a in status["missing"]):
-                        items.append({**dict(row), "push": "reminder", "round": int(row["remind_round"]), "ack": status, "addressed": True})
+                        items.append({**entry_dict(row), "push": "reminder", "round": int(row["remind_round"]), "ack": status, "addressed": True})
                         continue
                 if eid in reads or eid in delivered:
                     continue
                 if eid > start and (is_delivered or addressed) or (first_run and addressed and row["created_at"] >= day_ago):
-                    items.append({**dict(row), "push": "new", "round": 0, "addressed": addressed,
+                    items.append({**entry_dict(row), "push": "new", "round": 0, "addressed": addressed,
                                   "ack": self._ack_status(conn, row, groups) if row["ack_required"] else None})
             for item in items:
                 item["addresses"] = match.addresses.get(int(item["id"]), [])
@@ -1268,7 +1314,7 @@ class Board:
                 thread["entries"].append({
                     "id": str(eid), "author": row["author"], "kind": row["kind"], "body": row["body"],
                     "createdAt": row["created_at"], "attachments": attachments.get(eid, []),
-                    "addresses": addresses.get(eid, []),
+                    "addresses": addresses.get(eid, []), "artifact_ids": artifact_ids(row),
                     "ack": None if ack is None else {
                         "state": ack["state"], "required": ack["required"], "missing": ack["missing"],
                         "acks": [{"agent": a["agent"], "at": a["acked_at"]} for a in ack["acks"]],
@@ -1390,6 +1436,7 @@ def display_entry(row: sqlite3.Row | dict) -> None:
     extra = ""
     if isinstance(row, dict) and row.get("addresses"):
         extra = " → " + " ".join("@" + a for a in row["addresses"])
+    extra += "".join(" · a#" + aid for aid in artifact_ids(row))
     print(f"#{row['id']} [{row['created_at']}] {terminal_text(row['author'])} · {row['kind']}{terminal_text(extra)}")
     print(terminal_text(row["body"]))
     for path in (row.get("attachments", []) if isinstance(row, dict) else []):
@@ -1438,6 +1485,7 @@ def make_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("post", help="Post a markdown entry to a thread (ID, topic slug, or title).")
     p.add_argument("thread")
     p.add_argument("text", help="Markdown text, or - to read it from stdin.")
+    p.add_argument("--artifact", action="append", default=[], type=artifact_argument, help="Artifact id (a#xxxxxx or bare 6 hex), repeatable.")
     p.add_argument("--kind", choices=sorted(KINDS), default="note")
     p.add_argument("--to", action="append", default=[], help="Address the entry to an agent, job, or @group (repeatable).")
     p.add_argument("--file", action="append", default=[], help="Attach a local file path reference (the file is not copied).")
@@ -1447,9 +1495,12 @@ def make_parser() -> argparse.ArgumentParser:
     group = p.add_mutually_exclusive_group()
     group.add_argument("--since", type=int, help="Show entries with IDs greater than N.")
     group.add_argument("--unread", action="store_true", help="Show unread subscribed or addressed entries only.")
+    p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("search", help="Search thread titles and entry text.")
-    p.add_argument("text")
+    p.add_argument("text", nargs="?", default="")
+    p.add_argument("--artifact", type=artifact_argument, help="Only entries carrying this artifact id.")
+    p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("subscribe", help="Subscribe to a thread or tag:X.")
     p.add_argument("target")
@@ -1462,6 +1513,7 @@ def make_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("inbox", help="Show unread entries (addressed first, then subscriptions); marks them read.")
     p.add_argument("--limit", type=int, default=100)
+    p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("wait", help="Block until a thread or inbox has a new unread entry.")
     p.add_argument("target", nargs="?", help="Thread ID/title; omit with --inbox.")
@@ -1531,6 +1583,7 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("--hours", type=float, default=24)
     p.add_argument("--json", action="store_true")
 
+    sub.add_parser("export", help="Export the read-only board snapshot as JSON.")
     sub.add_parser("snapshot", help="Print the read-only JSON snapshot used by the web views.")
 
     p = sub.add_parser("web", help="Serve the read-only web view bound to 127.0.0.1.")
@@ -1683,7 +1736,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_hook(args, db_path)
     try:
         agent = validate_agent(args.as_name) if args.as_name else infer_agent_name()
-        read_only = cmd in ("web", "snapshot")
+        read_only = cmd in ("web", "snapshot", "export")
         board = Board(db_path, read_only=read_only)
         jobdir = jobdir_for()
         if not read_only and cmd not in ("init",):
@@ -1717,7 +1770,7 @@ def main(argv: list[str] | None = None) -> int:
         elif cmd == "post":
             body = read_body(args.text)
             files = [resolve_attachment(p) for p in args.file]
-            eid = board.post(args.thread, agent, body, args.kind, files, args.to)
+            eid = board.post(args.thread, agent, body, args.kind, files, args.to, args.artifact)
             entry = board.entry(eid)
             note = f" (thread #{entry['routed_from']} redirects by topic)" if entry["routed_from"] else ""
             print(f"Posted entry #{eid} to thread #{entry['thread_id']} {terminal_text(entry['title'])}{note}.")
@@ -1727,6 +1780,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Waiting for acknowledgement (`agent-board ack {eid}`); unacked after 15 min it is re-delivered, after 60 min escalated.")
         elif cmd == "read":
             thread, rows = board.read_thread(args.thread, agent, args.since, args.unread, jobdir)
+            if args.json:
+                print(json.dumps(rows, ensure_ascii=False))
+                return 0
             print(SAFETY_HEADER)
             print(f"Thread #{thread['id']}: {terminal_text(thread['title'])}")
             if thread["redirect"]:
@@ -1737,7 +1793,10 @@ def main(argv: list[str] | None = None) -> int:
             for row in rows:
                 display_entry(row)
         elif cmd == "search":
-            rows = board.search(args.text)
+            rows = board.search(args.text, artifact=args.artifact)
+            if args.json:
+                print(json.dumps(rows, ensure_ascii=False))
+                return 0
             print(SAFETY_HEADER)
             print()
             if not rows:
@@ -1752,7 +1811,11 @@ def main(argv: list[str] | None = None) -> int:
         elif cmd == "inbox":
             if args.limit < 1 or args.limit > 1000:
                 raise ValueError("Inbox limit must be between 1 and 1000.")
-            print_entry_set(board.inbox(agent, args.limit, mark_read=True, jobdir=jobdir))
+            rows = board.inbox(agent, args.limit, mark_read=True, jobdir=jobdir)
+            if args.json:
+                print(json.dumps(rows, ensure_ascii=False))
+            else:
+                print_entry_set(rows)
         elif cmd == "wait":
             if args.inbox == bool(args.target):
                 raise ValueError("Use either a thread target or --inbox.")
@@ -1860,7 +1923,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(data, ensure_ascii=False, indent=1))
             else:
                 print(render_digest(data))
-        elif cmd == "snapshot":
+        elif cmd in ("snapshot", "export"):
             print(json.dumps(board.snapshot(), ensure_ascii=False, separators=(",", ":")))
         elif cmd == "web":
             web_server(board, args.port)
