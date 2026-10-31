@@ -1678,7 +1678,9 @@ def web_server(board: Board, port: int) -> None:
     root = web_root()
     cache: dict = {"at": 0.0, "body": b""}
     assets = {"/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
-              "/assets/styles.css": ("styles.css", "text/css; charset=utf-8")}
+              "/assets/styles.css": ("styles.css", "text/css; charset=utf-8"),
+              "/assets/artifact-badges.js": ("artifact-badges.js", "text/javascript; charset=utf-8"),
+              "/assets/artifact-badges.css": ("artifact-badges.css", "text/css; charset=utf-8")}
     headers = {
         "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
         "Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex, nofollow, noarchive",
