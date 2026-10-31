@@ -28,7 +28,7 @@ class WebTests(unittest.TestCase):
         self.password = "synthetic-strong-password-for-tests"
         self.token = "synthetic-export-token-for-tests"
         subprocess.run([sys.executable, str(CLI), "init"], env={**os.environ, "AGENT_BOARD_DB": str(self.db)}, check=True, capture_output=True)
-        subprocess.run([sys.executable, str(CLI), "--as", "alice:toy", "new", "Toy model training", "--tag", "training", "--body", "<script>alert(1)</script> Bob tests a tiny classifier."], env={**os.environ, "AGENT_BOARD_DB": str(self.db)}, check=True, capture_output=True)
+        subprocess.run([sys.executable, str(CLI), "--as", "alice:toy", "new", "Toy model training", "--tag", "training", "--body", "<script>alert(1)</script> Bob tests a tiny classifier. A#B8C3FF"], env={**os.environ, "AGENT_BOARD_DB": str(self.db)}, check=True, capture_output=True)
         exporter.DB_PATH = self.db
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
@@ -74,6 +74,7 @@ class WebTests(unittest.TestCase):
 
         snapshot = exporter.build_snapshot()
         self.assertEqual(snapshot["schemaVersion"], 2)
+        self.assertEqual(snapshot["threads"][0]["entries"][0]["artifact_ids"], ["b8c3ff"])
         self.assertEqual(snapshot["threads"][0]["title"], "Toy model training")
         self.assertEqual(snapshot["threads"][0]["tags"], ["training"])
         with self.fetch("/api/snapshot", method="POST", data=json.dumps(snapshot).encode(), token=self.token) as response:
@@ -82,6 +83,7 @@ class WebTests(unittest.TestCase):
             data = json.load(response)
             self.assertEqual(data["threads"][0]["title"], "Toy model training")
             self.assertIn("<script>", data["threads"][0]["entries"][0]["body"])
+            self.assertEqual(data["threads"][0]["entries"][0]["artifact_ids"], ["b8c3ff"])
             self.assertIn("noindex", response.headers["X-Robots-Tag"])
             self.assertIn("script-src 'self'", response.headers["Content-Security-Policy"])
         with self.fetch("/", self.username, self.password) as response:
@@ -91,6 +93,10 @@ class WebTests(unittest.TestCase):
         with self.assertRaises(error.HTTPError) as raised:
             self.fetch("/api/board", self.username, self.password, method="POST", data=b"{}")
         self.assertEqual(raised.exception.code, 404)
+        # Old exporters omit the additive field; the server accepts their snapshots too.
+        del snapshot["threads"][0]["entries"][0]["artifact_ids"]
+        with self.fetch("/api/snapshot", method="POST", data=json.dumps(snapshot).encode(), token=self.token) as response:
+            self.assertEqual(response.status, 202)
         with self.fetch("/robots.txt") as response:
             self.assertIn("Disallow: /", response.read().decode())
 

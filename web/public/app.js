@@ -145,9 +145,22 @@
   }
   window.addEventListener('hashchange', () => render(true));
 
+  function entryArtifacts(entry) {
+    const ids = entry.artifact_ids ?? entry.artifactIds;
+    return Array.isArray(ids) ? [...new Set(ids.filter((id) => typeof id === 'string' && /^[0-9a-f]{6}$/i.test(id)).map((id) => id.toLowerCase()))] : [];
+  }
+  function artifactFilter() {
+    const value = new URLSearchParams(location.search).get('artifact');
+    if (value === null) return null;
+    return /^(?:a#)?[0-9a-f]{6}$/i.test(value) ? value.toLowerCase().replace(/^a#/, '') : ''; // invalid filter matches nothing
+  }
+  function artifactMatch(entry) {
+    const id = artifactFilter();
+    return id === null || entryArtifacts(entry).includes(id);
+  }
   function filtersMatch(entry) {
     const kind = $('#filter-kind').value, agent = $('#filter-agent').value;
-    return (!kind || entry.kind === kind) && (!agent || entry.author === agent);
+    return artifactMatch(entry) && (!kind || entry.kind === kind) && (!agent || entry.author === agent);
   }
   function queryMatch(entry, q) {
     if (!q) return true;
@@ -185,6 +198,7 @@
     const q = $('#search').value.trim();
     const archived = $('#show-archived').checked;
     const threads = (state.board?.threads || []).filter((t) => (archived || !t.archived) &&
+      (artifactFilter() === null || t.entries.some(artifactMatch)) &&
       (!q && !$('#filter-kind').value && !$('#filter-agent').value || t.entries.some((e) => filtersMatch(e) && queryMatch({ ...e, thread: t }, q)) || (q && t.title.toLowerCase().includes(q.toLowerCase()))));
     const topics = threads.filter((t) => t.pinned && !t.archived);
     const active = threads.filter((t) => !t.pinned && !t.archived);
@@ -214,7 +228,7 @@
       ${showThread ? `<div class="result-thread"><a href="#/thread/${encodeURIComponent(entry.thread.id)}?e=${esc(entry.id)}">#${esc(entry.thread.id)} ${esc(entry.thread.title)}</a></div>` : ''}
       <div class="entry-head">${avatar(entry.author)}<span class="author">${esc(entry.author)}</span>
         <span class="kind k-${KINDS.includes(entry.kind) ? entry.kind : 'note'}">${esc(entry.kind)}</span>
-        <span class="eid">#${esc(entry.id)}</span>${routed}<span class="time" title="${esc(t.abs)}">${esc(t.rel)}</span></div>
+        <span class="eid">#${esc(entry.id)}</span>${routed}<span class="time" title="${esc(t.abs)}">${esc(t.rel)}</span>${entryArtifacts(entry).length ? `<span class="artifact-ids">${entryArtifacts(entry).map((id) => `a#${id}`).join(' · ')}</span>` : ''}</div>
       ${chips || entry.ack ? `<div class="chips">${chips}${ackBadge(entry)}</div>` : ''}
       <div class="body">${markdown(entry.body, q)}</div>
       ${entry.attachments && entry.attachments.length ? `<div class="attachments">${entry.attachments.map((p) => '📎 ' + esc(p)).join('<br>')}</div>` : ''}
@@ -256,7 +270,7 @@
     renderSync();
     const r = route();
     document.querySelectorAll('.view-link').forEach((a) => a.classList.toggle('active', a.dataset.view === (r.view === 'thread' ? 'threads' : r.view)));
-    document.body.classList.toggle('show-panel', r.view !== 'threads' || Boolean($('#search').value.trim()));
+    document.body.classList.toggle('show-panel', r.view !== 'threads' || Boolean($('#search').value.trim()) || artifactFilter() !== null);
     renderList(r.id);
     if (!state.board) return;
     const q = $('#search').value.trim();
@@ -269,9 +283,9 @@
       const items = state.entries.filter((e) => e.kind === 'decision' && filtersMatch(e) && queryMatch(e, q)).sort((a, b) => Number(b.id) - Number(a.id)).slice(0, 150);
       return renderEntryList('Decisions', 'Newest first, with acknowledgement status.', items, q);
     }
-    if (q) {
+    if (q || artifactFilter() !== null) {
       const items = state.entries.filter((e) => filtersMatch(e) && queryMatch(e, q)).sort((a, b) => Number(b.id) - Number(a.id));
-      return renderEntryList(`Search: “${q}”`, `${items.length} matching entr${items.length === 1 ? 'y' : 'ies'}${items.length > 200 ? ' (showing 200)' : ''}`, items.slice(0, 200), q);
+      return renderEntryList(q ? `Search: “${q}”` : `Artifact: a#${artifactFilter()}`, `${items.length} matching entr${items.length === 1 ? 'y' : 'ies'}${items.length > 200 ? ' (showing 200)' : ''}`, items.slice(0, 200), q);
     }
   }
 
